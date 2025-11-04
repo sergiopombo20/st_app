@@ -45,14 +45,13 @@ WHERE EXTRACT(YEAR FROM o."DATE_") = {year}
 # --- Evolución mensual ---
 query_evolucion = f"""
 SELECT 
-    DATE_TRUNC('month', o."DATE_"::timestamp) AS mes,
-    SUM(o."TOTALBASKET") AS total_ventas,
-    COUNT(o."ORDERID") AS num_pedidos,
-    AVG(o."TOTALBASKET") AS ticket_medio
-FROM "Orders" o
-JOIN "Branches" b ON o."BRANCH_ID" = b."BRANCH_ID"
-WHERE EXTRACT(YEAR FROM o."DATE_") = {year}
-{"AND b.\"REGION\" ILIKE '%" + region + "%'" if region else ""}
+    mes,
+    SUM(total_ventas) AS total_ventas,
+    SUM(num_pedidos) AS num_pedidos,
+    AVG(ticket_medio) AS ticket_medio
+FROM mv_evolucion_mensual
+WHERE anio = {year}
+{"AND \"REGION\" ILIKE '%" + region + "%'" if region else ""}
 GROUP BY mes
 ORDER BY mes;
 """
@@ -60,46 +59,45 @@ ORDER BY mes;
 # --- Ventas por tienda / región ---
 query_mapa = f"""
 SELECT 
-    b."REGION",
-    b."CITY",
-    SUM(o."TOTALBASKET") AS total_ventas
-FROM "Orders" o
-JOIN "Branches" b ON o."BRANCH_ID" = b."BRANCH_ID"
-WHERE EXTRACT(YEAR FROM o."DATE_") = {year}
-GROUP BY b."REGION", b."CITY";
+    "REGION",
+    "CITY",
+    SUM(total_ventas) AS total_ventas,
+    SUM(num_pedidos) AS num_pedidos,
+    AVG(ticket_medio) AS ticket_medio
+FROM mv_ventas_mapa
+WHERE anio = {year}
+GROUP BY "REGION", "CITY"
+ORDER BY total_ventas DESC;
 """
+
 
 # --- Top productos ---
 query_top_productos = f"""
 SELECT 
-    c."ITEMNAME",
-    c."CATEGORY1" AS categoria,
-    c."BRAND" AS marca,
-    SUM(od."TOTALPRICE") AS ingresos,
-    SUM(od."AMOUNT") AS unidades
-FROM "Order_Details" od
-JOIN "Orders" o ON od."ORDERID" = o."ORDERID"
-JOIN "Categories" c ON od."ITEMID" = c."ITEMID"
-WHERE EXTRACT(YEAR FROM o."DATE_") = {year}
-GROUP BY c."ITEMNAME", c."CATEGORY1", c."BRAND"
+    "ITEMNAME",
+    categoria,
+    marca,
+    ingresos,
+    unidades
+FROM mv_top_productos
+WHERE anio = {year}
 ORDER BY ingresos DESC
 LIMIT 15;
 """
 
+
 # --- Top categorías ---
 query_top_categorias = f"""
 SELECT 
-    c."CATEGORY1" AS categoria,
-    SUM(od."TOTALPRICE") AS ingresos,
-    SUM(od."AMOUNT") AS unidades
-FROM "Order_Details" od
-JOIN "Orders" o ON od."ORDERID" = o."ORDERID"
-JOIN "Categories" c ON od."ITEMID" = c."ITEMID"
-WHERE EXTRACT(YEAR FROM o."DATE_") = {year}
-GROUP BY c."CATEGORY1"
+    categoria,
+    ingresos,
+    unidades
+FROM mv_top_categorias
+WHERE anio = {year}
 ORDER BY ingresos DESC
 LIMIT 10;
 """
+
 
 # ==========================================================
 # CARGA DE DATOS DESDE NEON
