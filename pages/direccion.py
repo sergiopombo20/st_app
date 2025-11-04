@@ -2,76 +2,196 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from utils.db import run_query
+import os
 
-st.set_page_config(page_title="Dirección - Dashboard", layout="wide")
+# ==========================================================
+#  CONFIGURACIÓN DE LA PÁGINA
+# ==========================================================
+st.set_page_config(
+    page_title="Panel de Dirección",
+    layout="wide"
+)
 
-st.title("📈 Panel de Dirección")
-st.markdown("### Resumen general de ventas y rendimiento")
+logo_path = os.path.join("logo", "logo.png")
 
-# --- 1️⃣ Consultas a Neon ---
-orders = run_query("""
-    SELECT o."ORDERID", o."BRANCH_ID", o."TOTALBASKET", o."DATE_", 
-           b."CITY", b."REGION"
-    FROM "Orders" o
-    JOIN "Branches" b ON o."BRANCH_ID" = b."BRANCH_ID";
-""")
+st.image(logo_path, width=120)
 
-details = run_query("""
-    SELECT d."ORDERID", d."ITEMID", d."AMOUNT", d."TOTALPRICE", c."ITEMCODE"
-    FROM "Order_Details" d
-    JOIN "Categories" c ON d."ITEMID" = c."ITEMID";
-""")
+st.title("Panel de Dirección - Análisis Global de Ventas")
 
-# --- 2️⃣ KPIs ---
-total_ventas = orders["TOTALBASKET"].astype(float).sum()
-num_pedidos = len(orders)
-ticket_medio = total_ventas / num_pedidos if num_pedidos > 0 else 0
+# ==========================================================
+# FILTROS LATERALES
+# ==========================================================
+st.sidebar.header("Filtros")
+
+year = st.sidebar.selectbox("Año", [2021, 2022, 2023], index=1)
+region = st.sidebar.text_input("Filtrar por región (opcional):")
+
+# ==========================================================
+# CONSULTAS SQL
+# ==========================================================
+
+# --- KPI generales ---
+query_kpis = f"""
+SELECT 
+    SUM(o."TOTALBASKET") AS total_ventas,
+    COUNT(o."ORDERID") AS num_pedidos,
+    AVG(o."TOTALBASKET") AS ticket_medio
+FROM "Orders" o
+JOIN "Branches" b ON o."BRANCH_ID" = b."BRANCH_ID"
+WHERE EXTRACT(YEAR FROM o."DATE_") = {year}
+{"AND b.\"REGION\" ILIKE '%" + region + "%'" if region else ""};
+"""
+
+# --- Evolución mensual ---
+query_evolucion = f"""
+SELECT 
+    DATE_TRUNC('month', o."DATE_"::timestamp) AS mes,
+    SUM(o."TOTALBASKET") AS total_ventas,
+    COUNT(o."ORDERID") AS num_pedidos,
+    AVG(o."TOTALBASKET") AS ticket_medio
+FROM "Orders" o
+JOIN "Branches" b ON o."BRANCH_ID" = b."BRANCH_ID"
+WHERE EXTRACT(YEAR FROM o."DATE_") = {year}
+{"AND b.\"REGION\" ILIKE '%" + region + "%'" if region else ""}
+GROUP BY mes
+ORDER BY mes;
+"""
+
+# --- Ventas por tienda / región ---
+query_mapa = f"""
+SELECT 
+    b."REGION",
+    b."CITY",
+    SUM(o."TOTALBASKET") AS total_ventas
+FROM "Orders" o
+JOIN "Branches" b ON o."BRANCH_ID" = b."BRANCH_ID"
+WHERE EXTRACT(YEAR FROM o."DATE_") = {year}
+GROUP BY b."REGION", b."CITY";
+"""
+
+# --- Top productos ---
+query_top_productos = f"""
+SELECT 
+    c."ITEMNAME",
+    c."CATEGORY1" AS categoria,
+    c."BRAND" AS marca,
+    SUM(od."TOTALPRICE") AS ingresos,
+    SUM(od."AMOUNT") AS unidades
+FROM "Order_Details" od
+JOIN "Orders" o ON od."ORDERID" = o."ORDERID"
+JOIN "Categories" c ON od."ITEMID" = c."ITEMID"
+WHERE EXTRACT(YEAR FROM o."DATE_") = {year}
+GROUP BY c."ITEMNAME", c."CATEGORY1", c."BRAND"
+ORDER BY ingresos DESC
+LIMIT 15;
+"""
+
+# --- Top categorías ---
+query_top_categorias = f"""
+SELECT 
+    c."CATEGORY1" AS categoria,
+    SUM(od."TOTALPRICE") AS ingresos,
+    SUM(od."AMOUNT") AS unidades
+FROM "Order_Details" od
+JOIN "Orders" o ON od."ORDERID" = o."ORDERID"
+JOIN "Categories" c ON od."ITEMID" = c."ITEMID"
+WHERE EXTRACT(YEAR FROM o."DATE_") = {year}
+GROUP BY c."CATEGORY1"
+ORDER BY ingresos DESC
+LIMIT 10;
+"""
+
+# ==========================================================
+# CARGA DE DATOS DESDE NEON
+# ==========================================================
+try:
+    kpis = run_query(query_kpis)
+    evolucion = run_query(query_evolucion)
+    mapa = run_query(query_mapa)
+    top_prod = run_query(query_top_productos)
+    top_cat = run_query(query_top_categorias)
+except Exception as e:
+    st.error(f"Error al cargar los datos: {e}")
+    st.stop()
+
+# ==========================================================
+# SECCIÓN 1 - KPIs GENERALES
+# ==========================================================
+st.subheader(f"Resumen General {year}")
 
 col1, col2, col3 = st.columns(3)
-col1.metric("💰 Ventas totales", f"{total_ventas:,.0f} €")
-col2.metric("🧾 Número de pedidos", f"{num_pedidos:,}")
-col3.metric("💳 Ticket medio", f"{ticket_medio:,.2f} €")
+if not kpis.empty:
+    col1.metric("Ventas Totales", f"{kpis['total_ventas'][0]:,.0f} €")
+    col2.metric("Nº Pedidos", f"{int(kpis['num_pedidos'][0]):,}")
+    col3.metric("Ticket Medio", f"{kpis['ticket_medio'][0]:,.2f} €")
+else:
+    st.warning("No se encontraron datos para los filtros seleccionados.")
 
-st.divider()
+# ==========================================================
+# SECCIÓN 2 - EVOLUCIÓN TEMPORAL
+# ==========================================================
+st.subheader("Evolución de Ventas Mensuales")
+if not evolucion.empty:
+    fig = px.line(
+        evolucion,
+        x="mes",
+        y="total_ventas",
+        title=f"Evolución mensual de ventas ({year})",
+        markers=True,
+        labels={"mes": "Mes", "total_ventas": "Ventas (€)"}
+    )
+    st.plotly_chart(fig, width='stretch')
+else:
+    st.info("No hay datos disponibles para el periodo seleccionado.")
 
-# --- 3️⃣ Ventas por región ---
-ventas_region = (
-    orders.groupby("REGION")["TOTALBASKET"]
-    .sum()
-    .reset_index()
-    .sort_values("TOTALBASKET", ascending=False)
-)
-fig_region = px.bar(
-    ventas_region,
-    x="REGION", y="TOTALBASKET",
-    title="Ventas totales por región",
-    text_auto=True
-)
-st.plotly_chart(fig_region, use_container_width=True)
+# ==========================================================
+# SECCIÓN 3 - ANÁLISIS GEOGRÁFICO
+# ==========================================================
+st.subheader("Ventas por Tienda / Región")
+if not mapa.empty:
+    fig_map = px.treemap(
+        mapa,
+        path=["REGION", "CITY"],
+        values="total_ventas",
+        color="total_ventas",
+        color_continuous_scale="Viridis",
+        title="Distribución geográfica de ventas"
+    )
+    st.plotly_chart(fig_map, width='stretch')
+else:
+    st.info("No hay información geográfica disponible.")
 
-# --- 4️⃣ Productos más vendidos ---
-productos_top = (
-    details.groupby("ITEMCODE")["AMOUNT"]
-    .sum()
-    .reset_index()
-    .sort_values("AMOUNT", ascending=False)
-    .head(10)
-)
-fig_top = px.bar(
-    productos_top,
-    x="ITEMCODE", y="AMOUNT",
-    title="Top 10 productos más vendidos",
-    text_auto=True
-)
-st.plotly_chart(fig_top, use_container_width=True)
+# ==========================================================
+# 🛒 SECCIÓN 4 - TOP PRODUCTOS
+# ==========================================================
+st.subheader("Top 15 Productos por Ingresos")
+if not top_prod.empty:
+    fig_bar = px.bar(
+        top_prod,
+        x="ITEMNAME",
+        y="ingresos",
+        color="categoria",
+        text_auto=".2s",
+        title="Top 15 Productos por Ingresos (coloreado por Categoría)",
+        labels={"ITEMNAME": "Producto", "ingresos": "Ingresos (€)", "categoria": "Categoría"}
+    )
+    st.plotly_chart(fig_bar, width='stretch')
+else:
+    st.info("No se encontraron productos para el periodo seleccionado.")
 
-# --- 5️⃣ Mapa interactivo de ventas ---
-branches = run_query('SELECT "BRANCH_ID", "CITY", "REGION" FROM "Branches";')
-ventas_mapa = (
-    orders.groupby(["BRANCH_ID", "CITY", "REGION"])["TOTALBASKET"]
-    .sum()
-    .reset_index()
-    .merge(branches, on="BRANCH_ID", how="left")
-)
-
-st.map(ventas_mapa.rename(columns={"LAT": "lat", "LON": "lon"}))
+# ==========================================================
+# SECCIÓN 5 - TOP CATEGORÍAS
+# ==========================================================
+st.subheader("Top 10 Categorías por Ingresos")
+if not top_cat.empty:
+    fig_cat = px.bar(
+        top_cat,
+        x="categoria",
+        y="ingresos",
+        text_auto=".2s",
+        title="Top Categorías por Ingresos",
+        labels={"categoria": "Categoría", "ingresos": "Ingresos (€)"}
+    )
+    st.plotly_chart(fig_cat, width='stretch')
+else:
+    st.info("No se encontraron categorías para el periodo seleccionado.")
