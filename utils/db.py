@@ -1,58 +1,63 @@
+import os
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
-from functools import lru_cache
+from dotenv import load_dotenv
 
 # ==========================================================
-# ⚙️ CONFIGURACIÓN DE CONEXIÓN A NEON
+# CARGA DE VARIABLES DE ENTORNO
 # ==========================================================
-DB_URL = 'postgresql://neondb_owner:npg_ewIv6k9gCGlK@ep-little-shadow-ab3l0o9a-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
+load_dotenv()
+
+DB_URL = os.getenv("DATABASE_URL")
+
+if not DB_URL:
+    raise ValueError("Falta la variable DATABASE_URL en el archivo .env")
+
 
 # ==========================================================
-# 🔗 GESTIÓN EFICIENTE DE LA CONEXIÓN
+# ENGINE CACHEADO (solo se crea una vez)
 # ==========================================================
-@lru_cache
+@st.cache_resource
 def get_engine():
-    """Devuelve una instancia de SQLAlchemy Engine cacheada (reutilizable)."""
+    """Devuelve una conexión cacheada para evitar recrear el engine cada vez."""
     return create_engine(DB_URL, pool_pre_ping=True)
 
 
-# ==========================================================
-# 🚀 FUNCIÓN PARA EJECUTAR CONSULTAS (CACHEADA)
-# ==========================================================
-@st.cache_data(show_spinner=False, ttl=600)
-def run_query(query: str, params: dict | None = None) -> pd.DataFrame:
-    """
-    Ejecuta una consulta SQL y devuelve un DataFrame.
-    - Usa PyArrow para acelerar la carga.
-    - Cachea los resultados durante 10 minutos.
-    """
-    try:
-        engine = get_engine()
-        with engine.connect() as conn:
-            df = pd.read_sql_query(
-                sql=text(query),
-                con=conn,
-                params=params,
-                dtype_backend="pyarrow"  # Mucho más rápido que el backend estándar
-            )
-        return df
-
-    except Exception as e:
-        st.error(f"❌ Error al ejecutar la consulta:\n{e}")
-        return pd.DataFrame()
+engine = get_engine()
 
 
 # ==========================================================
-# 🧩 FUNCIÓN AUXILIAR: EJECUTAR COMANDOS SQL (sin resultado)
+# CONSULTA SIN CACHÉ
 # ==========================================================
-def execute_query(query: str, params: dict | None = None) -> None:
+def run_query(query: str) -> pd.DataFrame:
     """
-    Ejecuta una consulta SQL que no devuelve resultados (CREATE, DROP, REFRESH, etc.)
+    Ejecuta una consulta SELECT sin usar caché.
     """
-    try:
-        engine = get_engine()
-        with engine.begin() as conn:
-            conn.execute(text(query), params or {})
-    except Exception as e:
-        st.error(f"⚠️ Error ejecutando comando SQL: {e}")
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn)
+
+
+# ==========================================================
+# CONSULTA CON CACHÉ (para queries pesadas)
+# ==========================================================
+@st.cache_data(show_spinner=False)
+def run_cached_query(query: str) -> pd.DataFrame:
+    """
+    Ejecuta una consulta SELECT usando caché.
+    Solo usar para consultas pesadas.
+    """
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn)
+
+
+# ==========================================================
+# OPCIONAL: CONSULTAS DE ESCRITURA (por si las usas en el futuro)
+# ==========================================================
+def execute_query(query: str) -> None:
+    """
+    Ejecuta una consulta SQL que modifica datos (INSERT, UPDATE, DELETE, DDL).
+    """
+    with engine.connect() as conn:
+        conn.execute(text(query))
+        conn.commit()

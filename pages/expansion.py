@@ -1,7 +1,11 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
-from utils.db import run_query
+import utils.db as db
+st.write("Funciones disponibles:", dir(db))
+from utils.db import run_query, run_cached_query
+
 import os
 
 # ==========================================================
@@ -9,6 +13,10 @@ import os
 # ==========================================================
 st.set_page_config(page_title="Panel de Expansión", layout="wide")
 
+
+# ==========================================================
+# LOGO Y TÍTULO
+# ==========================================================
 logo_path = os.path.join("logo", "logo.png")
 if os.path.exists(logo_path):
     st.image(logo_path, width=120)
@@ -16,22 +24,25 @@ if os.path.exists(logo_path):
 st.title("Panel de Expansión - Oportunidades de Crecimiento")
 
 # ==========================================================
-# TABS
+# TABS PRINCIPALES
 # ==========================================================
-tab1, tab2 = st.tabs(["Análisis de Oportunidades", "Simulador Predictivo"])
+tab1, tab2 = st.tabs(["📊 Análisis Territorial", "🧠 Recomendador de Nuevas Tiendas"])
+
 
 # ==========================================================
-# TAB 1: ANÁLISIS DE OPORTUNIDADES (TAL CUAL LO TENÍAS)
+# TAB 1 - ANÁLISIS TERRITORIAL
 # ==========================================================
 with tab1:
     st.subheader("Filtros de análisis")
-
     nivel = st.selectbox("Nivel de análisis", ["Región", "Ciudad", "Pueblo (Town)"], index=0)
+
     st.divider()
 
-    # --- CONSULTAS SQL ---
+    # ------------------------------------------------------
+    # CONSULTAS SQL (pesadas → cacheadas)
+    # ------------------------------------------------------
     if nivel == "Región":
-        query_gasto = f"""
+        query_gasto = """
         SELECT 
             b."REGION" AS nivel,
             SUM(o."TOTALBASKET") AS total_ventas,
@@ -44,9 +55,8 @@ with tab1:
         GROUP BY b."REGION"
         ORDER BY ventas_por_tienda DESC;
         """
-
     elif nivel == "Ciudad":
-        query_gasto = f"""
+        query_gasto = """
         SELECT 
             b."CITY" AS nivel,
             SUM(o."TOTALBASKET") AS total_ventas,
@@ -59,9 +69,8 @@ with tab1:
         GROUP BY b."CITY"
         ORDER BY ventas_por_tienda DESC;
         """
-
-    else:  # Pueblo (TOWN)
-        query_gasto = f"""
+    else:
+        query_gasto = """
         SELECT 
             COALESCE(b."TOWN", c."TOWN") AS nivel,
             SUM(o."TOTALBASKET") AS total_ventas,
@@ -76,7 +85,8 @@ with tab1:
         ORDER BY ventas_por_tienda DESC;
         """
 
-    query_pueblos_sin_tiendas = f"""
+    # --- Pueblos sin tiendas (pesada → cacheada)
+    query_pueblos_sin_tiendas = """
     SELECT 
         c."REGION",
         c."CITY",
@@ -89,155 +99,136 @@ with tab1:
     LIMIT 15;
     """
 
+    # ------------------------------------------------------
+    # EJECUCIÓN CON CACHE
+    # ------------------------------------------------------
     try:
-        df_gasto = run_query(query_gasto)
-        df_pueblos = run_query(query_pueblos_sin_tiendas)
+        df_gasto = run_cached_query(query_gasto)
+        df_pueblos = run_cached_query(query_pueblos_sin_tiendas)
     except Exception as e:
         st.error(f"Error al ejecutar las consultas: {e}")
         st.stop()
 
-    # --- Visualizaciones ---
+    # ------------------------------------------------------
+    # VISUALIZACIONES
+    # ------------------------------------------------------
     st.subheader(f"Rendimiento por {nivel}")
 
     if not df_gasto.empty:
         col1, col2 = st.columns(2)
+
         with col1:
             fig1 = px.bar(
                 df_gasto.head(10),
                 x="nivel",
                 y="ventas_por_tienda",
-                title=f"Regiones con mayor gasto por tienda" if nivel=="Región" else f"Top 10 {nivel.lower()}s con mayor gasto por tienda",
-                labels={"nivel": nivel, "ventas_por_tienda": "Ventas por tienda (€)"},
+                title=f"Top 10 {nivel.lower()}s con mayor gasto por tienda",
                 text_auto=".2s",
             )
             st.plotly_chart(fig1, use_container_width=True)
 
         with col2:
             fig2 = px.bar(
-                df_gasto.head(15),
+                df_gasto.head(10),
                 x="nivel",
                 y="clientes_por_tienda",
-                title=f"Regiones con más clientes por tienda" if nivel=="Región" else f"Top 10 {nivel.lower()}s con más clientes por tienda",
-                labels={"nivel": nivel, "clientes_por_tienda": "Clientes por tienda"},
+                title=f"Top 10 {nivel.lower()}s con más clientes por tienda",
                 text_auto=".2s",
                 color="clientes_por_tienda",
             )
             st.plotly_chart(fig2, use_container_width=True)
     else:
-        st.info("No se encontraron datos para el periodo seleccionado.")
+        st.info("No se encontraron datos para el nivel seleccionado.")
 
     st.divider()
-    st.subheader("Pueblos con Compradores pero sin Tiendas")
+    st.subheader("Pueblos con compradores pero sin tiendas")
 
     if not df_pueblos.empty:
         st.dataframe(df_pueblos, use_container_width=True)
-        fig3 = px.bar(
-            df_pueblos.head(15),
-            x="TOWN",
-            y="num_clientes",
-            color="CITY",
-            title="Top 15 pueblos con más clientes y sin tiendas",
-            labels={"TOWN": "Pueblo", "num_clientes": "Clientes"}
-        )
-        st.plotly_chart(fig3, use_container_width=True)
     else:
         st.info("No hay pueblos sin tiendas registrados.")
 
 
 # ==========================================================
-# TAB 2: SIMULADOR PREDICTIVO (HEURÍSTICO)
+# TAB 2 - RECOMENDADOR HEURÍSTICO
 # ==========================================================
 with tab2:
-    st.subheader("Recomendador de Nuevas Ubicaciones por Región (Nivel: Ciudad)")
+    st.subheader("Recomendador de nuevas ubicaciones")
 
-    regiones = run_query('SELECT DISTINCT "REGION" FROM "Customers" ORDER BY "REGION";')
-    region_sel = st.selectbox("Selecciona una región", regiones["REGION"].dropna().tolist())
+    # --- Región (consulta ligera → sin cache)
+    regiones = run_query('SELECT DISTINCT "REGION" FROM "Branches" ORDER BY "REGION";')["REGION"].tolist()
+    region_sel = st.selectbox("Selecciona una región", regiones)
 
-    query = f"""
+    # --- Consulta pesada → cacheada
+    query_ciudades = f"""
     SELECT 
-        c."REGION",
         c."CITY",
         COUNT(DISTINCT c."USERID") AS num_clientes,
-        COALESCE(SUM(o."TOTALBASKET"), 0) AS total_ventas,
-        COUNT(DISTINCT b."BRANCH_ID") AS num_tiendas
+        COUNT(DISTINCT b."BRANCH_ID") AS num_tiendas,
+        SUM(o."TOTALBASKET") AS total_ventas
     FROM "Customers" c
     LEFT JOIN "Orders" o ON c."USERID" = o."USERID"
     LEFT JOIN "Branches" b ON c."CITY" = b."CITY"
     WHERE c."REGION" = '{region_sel}'
-    GROUP BY c."REGION", c."CITY";
+    GROUP BY c."CITY";
     """
 
-    try:
-        df = run_query(query)
-    except Exception as e:
-        st.error(f"Error al cargar datos de la región: {e}")
-        st.stop()
+    df = run_cached_query(query_ciudades)
 
     if df.empty:
         st.warning("No hay datos suficientes para esta región.")
         st.stop()
 
-    # Calcular métricas básicas
-    df["ticket_medio"] = df["total_ventas"] / df["num_clientes"].replace(0, 1)
-    df["beneficio_base"] = df["num_clientes"] * df["ticket_medio"]
+    # ------------------------------------------------------
+    # HEURÍSTICA
+    # ------------------------------------------------------
+    df["clientes_por_tienda"] = df["num_clientes"] / df["num_tiendas"].replace(0, np.nan)
+    df["ventas_por_tienda"] = df["total_ventas"] / df["num_tiendas"].replace(0, np.nan)
 
-    # Penalización por nº de tiendas
-    def penalizacion_tiendas(n):
-        if n == 0:
-            return 0.4
-        elif n <= 2:
-            return 0.7
+    # Normalización
+    for col in ["clientes_por_tienda", "ventas_por_tienda"]:
+        df[col + "_norm"] = 100 * (df[col] - df[col].min()) / (df[col].max() - df[col].min())
+
+    df["score"] = 0.6 * df["clientes_por_tienda_norm"] + 0.4 * df["ventas_por_tienda_norm"]
+
+    # Tamaño recomendado
+    def recomendar_tamano(row):
+        if row["clientes_por_tienda"] < 200:
+            return "Pequeña"
+        elif row["clientes_por_tienda"] < 1000:
+            return "Mediana"
         else:
-            return 1.0
+            return "Grande"
 
-    df["penalizacion_tiendas"] = df["num_tiendas"].apply(penalizacion_tiendas)
+    df["tamano_recomendado"] = df.apply(recomendar_tamano, axis=1)
 
-    # Tamaño recomendado según la cantidad de clientes
-    df["tamano_recomendado"] = pd.cut(
-        df["num_clientes"],
-        bins=[-1, 2000, 6000, float("inf")],
-        labels=["Pequeña", "Mediana", "Grande"]
+    # Categorías recomendadas
+    def recomendar_categorias(tamano):
+        if tamano == "Pequeña":
+            return ["Electrónica"]
+        elif tamano == "Mediana":
+            return ["Electrónica", "Ropa", "Hogar", "Juguetes", "Deportes"]
+        else:
+            return ["Todas"]
+
+    df["categorias_recomendadas"] = df["tamano_recomendado"].apply(recomendar_categorias)
+
+    # Top 5
+    top5 = df.sort_values("score", ascending=False).head(5)
+
+    st.success(f"Top 5 ciudades recomendadas para abrir nuevas tiendas en {region_sel}:")
+    st.dataframe(
+        top5[["CITY", "num_clientes", "num_tiendas", "score", "tamano_recomendado", "categorias_recomendadas"]],
+        use_container_width=True
     )
 
-    df["factor_tamano"] = df["tamano_recomendado"].map({
-        "Pequeña": 1.0,
-        "Mediana": 2.0,
-        "Grande": 3.0
-    })
-
-    # Beneficio esperado y score final (normalizado)
-    df["beneficio_esperado"] = (
-        df["beneficio_base"] * df["factor_tamano"] * df["penalizacion_tiendas"]
+    fig = px.bar(
+        top5,
+        x="CITY",
+        y="score",
+        color="tamano_recomendado",
+        text_auto=".2s",
+        title="Ranking de ciudades recomendadas",
+        labels={"CITY": "Ciudad", "score": "Puntuación de oportunidad"}
     )
-    df["score_final"] = df["beneficio_esperado"] / (df["num_clientes"].replace(0, 1) ** 0.5)
-
-    # Filtrar ciudades con baja demanda
-    df = df[df["num_clientes"] >= 500]
-
-    # Ordenar y seleccionar top
-    df_top = df.sort_values(by="score_final", ascending=False).head(5)
-
-    # Categorías sugeridas
-    categorias = run_query('SELECT DISTINCT "CATEGORY1" FROM "Categories";')["CATEGORY1"].dropna().tolist()
-    top_categorias = categorias[:5]
-
-    st.subheader(f"Top 5 ciudades recomendadas en {region_sel}")
-    st.dataframe(df_top[["CITY", "num_clientes", "num_tiendas", "tamano_recomendado", "score_final"]], use_container_width=True)
-
-    for _, row in df_top.iterrows():
-        st.markdown(f"### {row['CITY']}")
-        st.write(f"- Clientes: {int(row['num_clientes'])}")
-        st.write(f"- Tiendas actuales: {int(row['num_tiendas'])}")
-        st.write(f"- Tamaño recomendado: **{row['tamano_recomendado']}**")
-
-        # Categorías sugeridas según tamaño
-        if row["tamano_recomendado"] == "Pequeña":
-            cats = [categorias[0]]
-        elif row["tamano_recomendado"] == "Mediana":
-            cats = top_categorias
-        else:
-            cats = categorias
-
-        st.write("Categorías recomendadas:", ", ".join(cats))
-        st.write(f"Score de rentabilidad estimado: {row['score_final']:.2f}")
-        st.divider()
+    st.plotly_chart(fig, use_container_width=True)
