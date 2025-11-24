@@ -18,7 +18,6 @@ if not DB_URL:
 # ==========================================================
 # ENGINE CACHEADO (solo se crea una vez)
 # ==========================================================
-@st.cache_resource
 def get_engine():
     """Devuelve una conexión cacheada para evitar recrear el engine cada vez."""
     return create_engine(DB_URL, pool_pre_ping=True)
@@ -36,7 +35,6 @@ def run_query(query: str) -> pd.DataFrame:
     """
     with engine.connect() as conn:
         return pd.read_sql(query, conn)
-
 
 # ==========================================================
 # CONSULTA CON CACHÉ (para queries pesadas)

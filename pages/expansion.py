@@ -2,45 +2,53 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import utils.db as db
-st.write("Funciones disponibles:", dir(db))
 from utils.db import run_query, run_cached_query
-
 import os
+
+
+# ==========================================================
+# CONTROL DE ACCESO
+# ==========================================================
+if "logged_in" not in st.session_state or not st.session_state["logged_in"]:
+    st.error("Debe iniciar sesión para acceder a esta página.")
+    st.stop()
+
+if st.session_state.get("role") not in ("admin", "expansion"):
+    st.error("No tiene permisos para acceder a este panel.")
+    st.stop()
+
 
 # ==========================================================
 # CONFIGURACIÓN DE LA PÁGINA
 # ==========================================================
 st.set_page_config(page_title="Panel de Expansión", layout="wide")
 
-
-# ==========================================================
-# LOGO Y TÍTULO
-# ==========================================================
 logo_path = os.path.join("logo", "logo.png")
 if os.path.exists(logo_path):
     st.image(logo_path, width=120)
 
 st.title("Panel de Expansión - Oportunidades de Crecimiento")
 
+
 # ==========================================================
 # TABS PRINCIPALES
 # ==========================================================
-tab1, tab2 = st.tabs(["📊 Análisis Territorial", "🧠 Recomendador de Nuevas Tiendas"])
+tab1, tab2 = st.tabs(["Análisis Territorial", "Recomendador de Nuevas Tiendas"])
 
 
 # ==========================================================
-# TAB 1 - ANÁLISIS TERRITORIAL
+# TAB 1 — ANÁLISIS TERRITORIAL
 # ==========================================================
 with tab1:
+
     st.subheader("Filtros de análisis")
     nivel = st.selectbox("Nivel de análisis", ["Región", "Ciudad", "Pueblo (Town)"], index=0)
-
     st.divider()
 
     # ------------------------------------------------------
     # CONSULTAS SQL (pesadas → cacheadas)
     # ------------------------------------------------------
+
     if nivel == "Región":
         query_gasto = """
         SELECT 
@@ -55,6 +63,7 @@ with tab1:
         GROUP BY b."REGION"
         ORDER BY ventas_por_tienda DESC;
         """
+
     elif nivel == "Ciudad":
         query_gasto = """
         SELECT 
@@ -69,7 +78,8 @@ with tab1:
         GROUP BY b."CITY"
         ORDER BY ventas_por_tienda DESC;
         """
-    else:
+
+    else:  # Pueblo
         query_gasto = """
         SELECT 
             COALESCE(b."TOWN", c."TOWN") AS nivel,
@@ -85,7 +95,7 @@ with tab1:
         ORDER BY ventas_por_tienda DESC;
         """
 
-    # --- Pueblos sin tiendas (pesada → cacheada)
+    # Pueblos sin tiendas
     query_pueblos_sin_tiendas = """
     SELECT 
         c."REGION",
@@ -100,7 +110,7 @@ with tab1:
     """
 
     # ------------------------------------------------------
-    # EJECUCIÓN CON CACHE
+    # EJECUCIÓN (pesadas → cache)
     # ------------------------------------------------------
     try:
         df_gasto = run_cached_query(query_gasto)
@@ -138,7 +148,7 @@ with tab1:
             )
             st.plotly_chart(fig2, use_container_width=True)
     else:
-        st.info("No se encontraron datos para el nivel seleccionado.")
+        st.info("No se encontraron datos para ese nivel.")
 
     st.divider()
     st.subheader("Pueblos con compradores pero sin tiendas")
@@ -149,17 +159,19 @@ with tab1:
         st.info("No hay pueblos sin tiendas registrados.")
 
 
+
 # ==========================================================
-# TAB 2 - RECOMENDADOR HEURÍSTICO
+# TAB 2 — RECOMENDADOR HEURÍSTICO
 # ==========================================================
 with tab2:
+
     st.subheader("Recomendador de nuevas ubicaciones")
 
-    # --- Región (consulta ligera → sin cache)
+    # ⇢ Consulta ligera → NO cacheada
     regiones = run_query('SELECT DISTINCT "REGION" FROM "Branches" ORDER BY "REGION";')["REGION"].tolist()
     region_sel = st.selectbox("Selecciona una región", regiones)
 
-    # --- Consulta pesada → cacheada
+    # ⇢ Consulta pesada → cacheada
     query_ciudades = f"""
     SELECT 
         c."CITY",
@@ -185,13 +197,15 @@ with tab2:
     df["clientes_por_tienda"] = df["num_clientes"] / df["num_tiendas"].replace(0, np.nan)
     df["ventas_por_tienda"] = df["total_ventas"] / df["num_tiendas"].replace(0, np.nan)
 
-    # Normalización
     for col in ["clientes_por_tienda", "ventas_por_tienda"]:
         df[col + "_norm"] = 100 * (df[col] - df[col].min()) / (df[col].max() - df[col].min())
 
-    df["score"] = 0.6 * df["clientes_por_tienda_norm"] + 0.4 * df["ventas_por_tienda_norm"]
+    df["score"] = (
+        0.6 * df["clientes_por_tienda_norm"] +
+        0.4 * df["ventas_por_tienda_norm"]
+    )
 
-    # Tamaño recomendado
+    # Tamaño tienda
     def recomendar_tamano(row):
         if row["clientes_por_tienda"] < 200:
             return "Pequeña"
@@ -213,10 +227,10 @@ with tab2:
 
     df["categorias_recomendadas"] = df["tamano_recomendado"].apply(recomendar_categorias)
 
-    # Top 5
+    # TOP 5
     top5 = df.sort_values("score", ascending=False).head(5)
 
-    st.success(f"Top 5 ciudades recomendadas para abrir nuevas tiendas en {region_sel}:")
+    st.success(f"Top 5 ciudades recomendadas en {region_sel}")
     st.dataframe(
         top5[["CITY", "num_clientes", "num_tiendas", "score", "tamano_recomendado", "categorias_recomendadas"]],
         use_container_width=True
@@ -227,8 +241,7 @@ with tab2:
         x="CITY",
         y="score",
         color="tamano_recomendado",
-        text_auto=".2s",
         title="Ranking de ciudades recomendadas",
-        labels={"CITY": "Ciudad", "score": "Puntuación de oportunidad"}
+        text_auto=".2s",
     )
     st.plotly_chart(fig, use_container_width=True)
