@@ -4,12 +4,13 @@ import numpy as np
 import plotly.express as px
 from utils.db import run_query
 import os
-
+from tensorflow.keras.models import load_model
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+import pickle
 
 # ==========================================================
 # CONTROL DE ACCESO
 # ==========================================================
-
 if "logged_in" not in st.session_state or not st.session_state["logged_in"]:
     st.error("Debe iniciar sesión para acceder a esta página.")
     st.stop()
@@ -17,7 +18,6 @@ if "logged_in" not in st.session_state or not st.session_state["logged_in"]:
 if st.session_state.get("role") not in ("admin", "direccion"):
     st.error("No tiene permisos para acceder a este panel.")
     st.stop()
-
 
 
 # ==========================================================
@@ -39,8 +39,14 @@ def plot_line(df, x, y, title):
     if df.empty:
         st.info("No hay datos disponibles.")
         return
-    fig = px.line(df, x=x, y=y, markers=True, title=title,
-                  labels={x: "Periodo", y: "Valor"})
+    fig = px.line(
+        df,
+        x=x,
+        y=y,
+        markers=True,
+        title=title,
+        labels={x: "Periodo", y: "Valor"},
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -48,8 +54,15 @@ def plot_bar(df, x, y, title, color=None):
     if df.empty:
         st.info("No hay datos disponibles.")
         return
-    fig = px.bar(df, x=x, y=y, color=color, text_auto=".2s", title=title,
-                 labels={x: x.title(), y: y.title()})
+    fig = px.bar(
+        df,
+        x=x,
+        y=y,
+        color=color,
+        text_auto=".2s",
+        title=title,
+        labels={x: x.title(), y: y.title()},
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -63,7 +76,7 @@ def plot_treemap(df, title="Distribución geográfica de ventas"):
         values="total_ventas",
         color="total_ventas",
         color_continuous_scale="Viridis",
-        title=title
+        title=title,
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -71,7 +84,9 @@ def plot_treemap(df, title="Distribución geográfica de ventas"):
 # ==========================================================
 # TABS PRINCIPALES
 # ==========================================================
-tab1, tab2, tab3 = st.tabs(["Análisis por Año", "Comparativa entre Años", "Predicción de Ventas"])
+tab1, tab2, tab3 = st.tabs(
+    ["Análisis por Año", "Comparativa entre Años", "Predicción de Ventas"]
+)
 
 
 # ==========================================================
@@ -184,7 +199,13 @@ with tab1:
 
     st.divider()
     st.subheader("Top 15 Productos por Ingresos")
-    plot_bar(top_prod, "ITEMNAME", "ingresos", "Top Productos por Ingresos", "categoria")
+    plot_bar(
+        top_prod,
+        "ITEMNAME",
+        "ingresos",
+        "Top Productos por Ingresos",
+        "categoria",
+    )
 
     st.divider()
     st.subheader("Top 10 Categorías por Ingresos")
@@ -236,7 +257,7 @@ with tab2:
                 x="anio",
                 y="total_ventas",
                 title="Evolución Global de Ventas",
-                text_auto=".2s"
+                text_auto=".2s",
             )
             st.plotly_chart(fig, use_container_width=True)
 
@@ -246,13 +267,15 @@ with tab2:
                 df_comp,
                 x="anio",
                 y="ticket_medio",
-                markers=True
+                markers=True,
+                title="Evolución Ticket Medio Global",
             )
             st.plotly_chart(fig2, use_container_width=True)
         else:
             st.info("No hay datos disponibles.")
     else:
         # Consulta por regiones seleccionadas
+        regiones_str = ", ".join([f"'{r}'" for r in regiones_seleccionadas])
         query_comparativa = f"""
         SELECT 
             EXTRACT(YEAR FROM o."DATE_") AS anio,
@@ -262,7 +285,7 @@ with tab2:
             AVG(o."TOTALBASKET") AS ticket_medio
         FROM "Orders" o
         JOIN "Branches" b ON o."BRANCH_ID" = b."BRANCH_ID"
-        WHERE b."REGION" IN ({', '.join([f"'{r}'" for r in regiones_seleccionadas])})
+        WHERE b."REGION" IN ({regiones_str})
         GROUP BY anio, b."REGION"
         ORDER BY anio, b."REGION";
         """
@@ -277,7 +300,8 @@ with tab2:
                 y="total_ventas",
                 color="REGION",
                 barmode="group",
-                text_auto=".2s"
+                text_auto=".2s",
+                title="Evolución de Ventas por Región",
             )
             st.plotly_chart(fig, use_container_width=True)
 
@@ -288,25 +312,19 @@ with tab2:
                 x="anio",
                 y="ticket_medio",
                 color="REGION",
-                markers=True
+                markers=True,
+                title="Evolución Ticket Medio por Región",
             )
             st.plotly_chart(fig2, use_container_width=True)
         else:
             st.info("No se encontraron datos para esas regiones.")
 
+
 # ==========================================================
-# TAB 3 — PREDICCIÓN DE VENTAS (OPTIMIZADO + CORREGIDO)
+# TAB 3 — PREDICCIÓN DE VENTAS (SARIMA DINÁMICO)
 # ==========================================================
 
-import numpy as np
-import pandas as pd
-import plotly.express as px
-from tensorflow.keras.models import load_model
-import pickle
-
-# ============================================
-# 0. CACHE DE DATOS (solo se consulta una vez)
-# ============================================
+# 0. CACHE DE DATOS
 @st.cache_data
 def load_all_sales():
     query = """
@@ -324,16 +342,10 @@ def load_all_sales():
     return df
 
 
-# ============================================
-# 1. CACHE DE MODELOS (se carga solo una vez)
-# ============================================
+# 1. CACHE DE MODELOS (sin SARIMA en disco)
 @st.cache_resource
 def load_models():
     models = {}
-
-    # SARIMA
-    with open("modelos/sarima_final_model.pkl", "rb") as f:
-        models["SARIMA"] = pickle.load(f)
 
     # Random Forest
     with open("modelos/random_forest_sales.pkl", "rb") as f:
@@ -343,49 +355,69 @@ def load_models():
     with open("modelos/xgboost_sales_model.pkl", "rb") as f:
         models["XGB"] = pickle.load(f)
 
-    # LSTM (corregido: compile=False)
+    # LSTM
     models["LSTM_MODEL"] = load_model("modelos/lstm_sales_model.h5", compile=False)
-
     with open("modelos/lstm_scaler.pkl", "rb") as f:
         models["LSTM_SCALER"] = pickle.load(f)
+
     # LSTM estilo PDF
     models["LSTM_PDF"] = load_model("modelos/lstm_pdf_model.h5", compile=False)
     with open("modelos/lstm_pdf_scaler.pkl", "rb") as f:
         models["LSTM_PDF_SCALER"] = pickle.load(f)
 
-
     return models
 
 
-# ============================================
-# 2. PREDICCIÓN UNIFICADA PARA TODOS LOS MODELOS
-# ============================================
+# 2. FUNCIÓN SARIMA DINÁMICO
+def predict_sarima(ts, horizonte):
+    model = SARIMAX(
+        ts,
+        order=(2, 1, 2),
+        seasonal_order=(1, 1, 1, 7),
+        enforce_stationarity=False,
+        enforce_invertibility=False,
+    )
+    res = model.fit(disp=False)
+    pred = res.forecast(horizonte)
+
+    # Clipping para evitar valores locos
+    max_hist = ts.max()
+    pred = pred.clip(lower=0, upper=max_hist * 3)
+
+    return pred.values
+
+
+# 3. PREDICCIÓN UNIFICADA PARA TODOS LOS MODELOS
 def predict(modelo_sel, ts, horizonte, _models):
     modelo_sel = modelo_sel.upper()
 
-    # ===== SARIMA =====
+    # ===== SARIMA DINÁMICO =====
     if modelo_sel == "SARIMA":
-        return _models["SARIMA"].forecast(steps=horizonte).values
+        return predict_sarima(ts, horizonte)
 
     # ===== RANDOM FOREST / XGBOOST =====
     if modelo_sel in ["RANDOM FOREST", "XGBOOST"]:
         model = _models["RF"] if modelo_sel == "RANDOM FOREST" else _models["XGB"]
 
-        future_dates = pd.date_range(start=ts.index.max(), periods=horizonte+1, freq="D")[1:]
+        future_dates = pd.date_range(
+            start=ts.index.max(), periods=horizonte + 1, freq="D"
+        )[1:]
         df_future = pd.DataFrame({"date": future_dates})
 
         df_future["day"] = df_future.date.dt.day
         df_future["month"] = df_future.date.dt.month
         df_future["dow"] = df_future.date.dt.dayofweek
 
-        df_future["day_sin"]   = np.sin(2*np.pi*df_future["day"] / 31)
-        df_future["day_cos"]   = np.cos(2*np.pi*df_future["day"] / 31)
-        df_future["month_sin"] = np.sin(2*np.pi*df_future["month"] / 12)
-        df_future["month_cos"] = np.cos(2*np.pi*df_future["month"] / 12)
-        df_future["dow_sin"]   = np.sin(2*np.pi*df_future["dow"] / 7)
-        df_future["dow_cos"]   = np.cos(2*np.pi*df_future["dow"] / 7)
+        df_future["day_sin"] = np.sin(2 * np.pi * df_future["day"] / 31)
+        df_future["day_cos"] = np.cos(2 * np.pi * df_future["day"] / 31)
+        df_future["month_sin"] = np.sin(2 * np.pi * df_future["month"] / 12)
+        df_future["month_cos"] = np.cos(2 * np.pi * df_future["month"] / 12)
+        df_future["dow_sin"] = np.sin(2 * np.pi * df_future["dow"] / 7)
+        df_future["dow_cos"] = np.cos(2 * np.pi * df_future["dow"] / 7)
 
-        X = df_future[["day_sin","day_cos","month_sin","month_cos","dow_sin","dow_cos"]]
+        X = df_future[
+            ["day_sin", "day_cos", "month_sin", "month_cos", "dow_sin", "dow_cos"]
+        ]
         return model.predict(X)
 
     # ===== LSTM =====
@@ -394,27 +426,25 @@ def predict(modelo_sel, ts, horizonte, _models):
         scaler = _models["LSTM_SCALER"]
 
         last_window = ts.values[-14:]
-        seq = scaler.transform(last_window.reshape(-1,1))
+        seq = scaler.transform(last_window.reshape(-1, 1))
         preds = []
 
         for _ in range(horizonte):
-            p = lstm.predict(seq.reshape(1,14,1), verbose=0)
+            p = lstm.predict(seq.reshape(1, 14, 1), verbose=0)
             preds.append(p[0][0])
             seq = np.vstack([seq[1:], p])
 
-        return scaler.inverse_transform(np.array(preds).reshape(-1,1)).flatten()
-    
-    # ========= LSTM ESTILO PDF ==========
-    if modelo_sel.upper() == "LSTM_PDF":
+        return scaler.inverse_transform(
+            np.array(preds).reshape(-1, 1)
+        ).flatten()
+
+    # ===== LSTM PDF =====
+    if modelo_sel == "LSTM_PDF":
         lstm = _models["LSTM_PDF"]
         scaler = _models["LSTM_PDF_SCALER"]
 
         time_steps = 50
-
-        # Última secuencia real
-        last_seq = ts.values[-time_steps:].reshape(-1,1)
-
-        # Normalizar igual que en entrenamiento
+        last_seq = ts.values[-time_steps:].reshape(-1, 1)
         last_scaled = scaler.transform(last_seq).reshape(-1)
 
         seq = last_scaled.copy()
@@ -426,57 +456,59 @@ def predict(modelo_sel, ts, horizonte, _models):
             preds.append(p)
             seq = np.append(seq, p)
 
-        preds = scaler.inverse_transform(np.array(preds).reshape(-1,1)).flatten()
+        preds = scaler.inverse_transform(
+            np.array(preds).reshape(-1, 1)
+        ).flatten()
         return preds
 
-# ============================================
-# 3. CACHE DE PREDICCIÓN
-# ============================================
+
+# 4. CACHE DE PREDICCIÓN
 @st.cache_data
 def cached_prediction(modelo_sel, horizonte, region, ciudad, ts, _models):
     return predict(modelo_sel, ts, horizonte, _models)
 
 
-# ============================================
-# 4. UI DEL TAB
-# ============================================
+# 5. UI DEL TAB 3
 with tab3:
     st.subheader("Predicción de Ventas Futuras")
 
-    # ===== Cargar datos y modelos caché =====
     df_all = load_all_sales()
     models = load_models()
 
-    # ============================================
-    # 4.1 Filtros región / ciudad / modelo
-    # ============================================
+    # Filtros
     regiones = ["Todas"] + sorted(df_all["REGION"].dropna().unique().tolist())
     ciudades = ["Todas"]
 
-    col1, col2, col3 = st.columns([1,1,1])
+    col1, col2, col3 = st.columns(3)
 
     with col1:
         region_sel = st.selectbox("Región:", regiones, index=0)
 
     if region_sel != "Todas":
-        ciudades += sorted(df_all[df_all["REGION"] == region_sel]["CITY"].dropna().unique().tolist())
+        ciudades += sorted(
+            df_all[df_all["REGION"] == region_sel]["CITY"]
+            .dropna()
+            .unique()
+            .tolist()
+        )
 
     with col2:
         ciudad_sel = st.selectbox("Ciudad:", ciudades, index=0)
 
     with col3:
-        modelo_sel = st.selectbox("Modelo:", ["SARIMA", "Random Forest", "XGBoost", "LSTM", "LSTM_PDF"])
+        modelo_sel = st.selectbox(
+            "Modelo:",
+            ["SARIMA", "Random Forest", "XGBoost", "LSTM", "LSTM_PDF"],
+        )
 
-    horizonte = st.radio("Horizonte de predicción:", [30, 90], horizontal=True)
+    horizonte = st.radio(
+        "Horizonte de predicción (días):", [30, 90], horizontal=True
+    )
 
-    # ============================================
-    # 4.2 Filtrar datos sin tocar la base
-    # ============================================
+    # Filtrado de datos
     df = df_all.copy()
-
     if region_sel != "Todas":
         df = df[df["REGION"] == region_sel]
-
     if ciudad_sel != "Todas":
         df = df[df["CITY"] == ciudad_sel]
 
@@ -488,37 +520,35 @@ with tab3:
         st.warning("No hay datos disponibles para estos filtros.")
         st.stop()
 
-    # ============================================
-    # 4.3 Predicción cacheada (rápido)
-    # ============================================
-    pred = cached_prediction(modelo_sel, horizonte, region_sel, ciudad_sel, ts, models)
+    # Predicción cacheada
+    pred = cached_prediction(
+        modelo_sel, horizonte, region_sel, ciudad_sel, ts, models
+    )
 
-    # ============================================
-    # 4.4 Mostrar SOLO datos recientes desde 2023
-    # ============================================
+    # Mostrar solo datos recientes desde 2023
     fecha_corte = pd.to_datetime("2023-01-01")
     ts_reciente = ts[ts.index >= fecha_corte]
 
-    df_real = ts_reciente.reset_index().rename(columns={"daily_sales":"value"})
+    df_real = ts_reciente.reset_index().rename(columns={"daily_sales": "value"})
     df_real["tipo"] = "Real"
 
-    future_dates = pd.date_range(start=ts.index.max(), periods=horizonte+1, freq="D")[1:]
-    df_pred = pd.DataFrame({"date": future_dates, "value": pred, "tipo": "Predicción"})
+    future_dates = pd.date_range(
+        start=ts.index.max(), periods=horizonte + 1, freq="D"
+    )[1:]
+    df_pred = pd.DataFrame(
+        {"date": future_dates, "value": pred, "tipo": "Predicción"}
+    )
 
     df_full = pd.concat([df_real, df_pred])
 
-    # ============================================
-    # 4.5 Gráfica REAL + PRED
-    # ============================================
     fig = px.line(
         df_full,
         x="date",
         y="value",
         color="tipo",
         title=f"Predicción de Ventas — Modelo {modelo_sel}",
-        template="plotly_white"
+        template="plotly_white",
     )
-
     fig.update_layout(
         xaxis_title="Fecha",
         yaxis_title="Ventas",
