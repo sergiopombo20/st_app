@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # ==========================================================
 load_dotenv()
 
-DB_URL = os.getenv("DATABASE_URL")
+DB_URL = st.secrets.get("DATABASE_URL") or os.getenv("DATABASE_URL")
 
 if not DB_URL:
     raise ValueError("Falta la variable DATABASE_URL en el archivo .env")
